@@ -6,6 +6,10 @@ from models import SolicitudChat
 from ai_agent import procesar_mensaje, generar_prompt_chat, generar_prompt_faq, sesiones_activas
 from whatsapp_utils import enviar_mensaje_whatsapp
 from dotenv import load_dotenv
+from logging_utils import get_logger, log_event
+import uuid
+
+logger = get_logger("sofia.api")
 
 load_dotenv()
 app = FastAPI(title="Sofia Chat Demo Promise")
@@ -45,20 +49,91 @@ async def encolar_mensaje(telefono: str, texto: str):
 
 async def procesar_y_responder(telefono: str, texto: str):
     """Lógica central: llama a la IA y envía la respuesta. Separada del webhook."""
+    log_event(
+        logger,
+        "INFO",
+        "chat.user_message",
+        telefono=telefono,
+        texto_resumen=texto[:300],
+        texto_length=len(texto),
+    )
+
     resultado = await procesar_mensaje(telefono, texto)
 
-    print("\n" + "=" * 40)
-    print(f"📩 MENSAJE DEL USUARIO ({telefono}): {texto}")
-    print(f"🤖 DECISIÓN DE LA IA:")
-    print(resultado.model_dump_json(indent=2))
-    print("=" * 40 + "\n")
+    log_event(
+        logger,
+        "INFO",
+        "chat.ia_decision",
+        telefono=telefono,
+        estado_conversacion=resultado.estado_conversacion,
+        respuesta_length=len(resultado.respuesta_ia_para_usuario or ""),
+    )
 
     await enviar_mensaje_whatsapp(telefono, resultado.respuesta_ia_para_usuario)
 
     if resultado.estado_conversacion == "FINALIZADA":
-        print(f"✅ CHAT FINALIZADO con {telefono}. Borrando sesión de memoria.")
+        log_event(
+            logger,
+            "INFO",
+            "chat.ended",
+            telefono=telefono,
+            reason="estado_finalizada",
+        )
         if telefono in sesiones_activas:
             del sesiones_activas[telefono]
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Middleware para loguear cada request entrante y su tiempo de respuesta."""
+    request_id = str(uuid.uuid4())
+    start_time = time.perf_counter()
+    path = request.url.path
+    method = request.method
+    client_ip = request.client.host if request.client else None
+
+    log_event(
+        logger,
+        "INFO",
+        "request.incoming",
+        request_id=request_id,
+        method=method,
+        path=path,
+        client_ip=client_ip,
+    )
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        log_event(
+            logger,
+            "ERROR",
+            "request.error",
+            request_id=request_id,
+            method=method,
+            path=path,
+            client_ip=client_ip,
+            duration_ms=duration_ms,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    log_event(
+        logger,
+        "INFO",
+        "request.completed",
+        request_id=request_id,
+        method=method,
+        path=path,
+        client_ip=client_ip,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+    )
+
+    return response
 
 
 @app.get("/ping")
@@ -70,6 +145,17 @@ async def ping():
 async def iniciar_chat(solicitud: SolicitudChat):
     """Recibe la orden para iniciar el chat de demostración con un inscrito a la presentación."""
     telefono = solicitud.phone.replace("+", "").replace(" ", "")
+
+    log_event(
+        logger,
+        "INFO",
+        "chat.start",
+        telefono=telefono,
+        name=solicitud.name,
+        role=solicitud.role,
+        clan=solicitud.clan,
+        advancedPath=solicitud.advancedPath,
+    )
 
     contexto = solicitud.model_dump()
     sesiones_activas[telefono] = {
@@ -111,8 +197,22 @@ async def recibir_mensaje_whatsapp(request: Request):
     try:
         body = await request.json()
 
+        log_event(
+            logger,
+            "INFO",
+            "webhook.received",
+            raw_event=body.get("event"),
+        )
+
         evento = body.get("event", "")
         if evento not in ["messages.upsert", "MESSAGES_UPSERT"]:
+            log_event(
+                logger,
+                "INFO",
+                "webhook.ignored",
+                reason="No es un evento de mensaje",
+                raw_event=evento,
+            )
             return {"status": "ignorado", "reason": "No es un evento de mensaje"}
 
         data = body.get("data", {})
@@ -123,6 +223,13 @@ async def recibir_mensaje_whatsapp(request: Request):
         remote_jid = key.get("remoteJid", "")
 
         if from_me or "@g.us" in remote_jid or "status@broadcast" in remote_jid:
+            log_event(
+                logger,
+                "INFO",
+                "webhook.ignored",
+                reason="Mensaje del bot o irrelevante",
+                remote_jid=remote_jid,
+            )
             return {"status": "ignorado", "reason": "Mensaje del bot o irrelevante"}
 
         telefono = remote_jid.split("@")[0]
@@ -141,12 +248,32 @@ async def recibir_mensaje_whatsapp(request: Request):
             if tipo_mensaje in ["audioMessage", "imageMessage", "videoMessage", "documentMessage", "stickerMessage"]:
                 respuesta_amable = "¡Uy! 🙈 Por ahora solo puedo procesar mensajes de texto. ¿Podrías escribirme lo que me decías en esa nota o archivo, por favor? ✍️"
                 await enviar_mensaje_whatsapp(telefono, respuesta_amable)
+                log_event(
+                    logger,
+                    "INFO",
+                    "webhook.non_text_message",
+                    telefono=telefono,
+                    tipo_mensaje=tipo_mensaje,
+                )
                 return {"status": "ok", "reason": "Aviso de solo texto enviado"}
             else:
+                log_event(
+                    logger,
+                    "INFO",
+                    "webhook.unsupported_message",
+                    telefono=telefono,
+                    tipo_mensaje=tipo_mensaje,
+                )
                 return {"status": "ignorado", "reason": f"Tipo de mensaje no soportado: {tipo_mensaje}"}
 
         # --- SISTEMA DE DESPERTAR AUTOMÁTICO (MODO FAQ ORGÁNICO) ---
         if telefono not in sesiones_activas:
+            log_event(
+                logger,
+                "INFO",
+                "faq.session_started",
+                telefono=telefono,
+            )
             print(f"\n⚠️ El usuario {telefono} inició el chat orgánicamente. Modo FAQ activado.")
             sesiones_activas[telefono] = {
                 "es_faq": True,
@@ -161,8 +288,20 @@ async def recibir_mensaje_whatsapp(request: Request):
         # --- DEBOUNCE: encolar en lugar de procesar directo ---
         await encolar_mensaje(telefono, texto)
 
+        log_event(
+            logger,
+            "INFO",
+            "webhook.message_enqueued",
+            telefono=telefono,
+        )
         return {"status": "ok", "reason": "Mensaje encolado"}
 
     except Exception as e:
-        print(f"❌ Error procesando mensaje del webhook: {e}")
+        log_event(
+            logger,
+            "ERROR",
+            "webhook.error",
+            error_message=str(e),
+            error_type=type(e).__name__,
+        )
         return {"status": "error", "message": str(e)}

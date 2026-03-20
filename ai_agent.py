@@ -2,10 +2,13 @@ import os
 from openai import AsyncOpenAI
 from models import RespuestaIA
 from dotenv import load_dotenv
+from logging_utils import get_logger, log_event
 
 load_dotenv()
 
 client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+logger = get_logger("sofia.openai")
 
 # Memoria RAM: Almacena el historial y los datos del usuario usando el teléfono como llave
 sesiones_activas = {}
@@ -141,22 +144,71 @@ NO eres tutora, asistente técnico general ni guía de aprendizaje. NO des instr
 
 
 
+
 async def procesar_mensaje(telefono: str, mensaje_usuario: str) -> RespuestaIA:
     """Envía el historial de mensajes al LLM y retorna la respuesta estructurada."""
     if telefono not in sesiones_activas:
+        log_event(
+            logger,
+            "WARNING",
+            "openai.session_missing",
+            telefono=telefono,
+        )
         raise ValueError("No hay una sesión activa para este número.")
 
     sesion = sesiones_activas[telefono]
     sesion["historial"].append({"role": "user", "content": mensaje_usuario})
 
-    # Llamada a OpenAI exigiendo el formato estructurado RespuestaIA
-    response = await client.beta.chat.completions.parse(
+    history_length = len(sesion["historial"])
+
+    log_event(
+        logger,
+        "INFO",
+        "openai.call.start",
+        telefono=telefono,
+        history_length=history_length,
+        last_user_message_resumen=mensaje_usuario[:300],
         model="gpt-4o-mini",
-        messages=sesion["historial"],
-        response_format=RespuestaIA,
+        mode="beta.chat.completions.parse",
     )
 
+    import time
+
+    start_time = time.perf_counter()
+
+    try:
+        # Llamada a OpenAI exigiendo el formato estructurado RespuestaIA
+        response = await client.beta.chat.completions.parse(
+            model="gpt-4o-mini",
+            messages=sesion["historial"],
+            response_format=RespuestaIA,
+        )
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        log_event(
+            logger,
+            "ERROR",
+            "openai.call.exception",
+            telefono=telefono,
+            duration_ms=duration_ms,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+
     resultado_ia = response.choices[0].message.parsed
+
+    log_event(
+        logger,
+        "INFO",
+        "openai.call.end",
+        telefono=telefono,
+        duration_ms=duration_ms,
+        estado_conversacion=resultado_ia.estado_conversacion,
+        respuesta_length=len(resultado_ia.respuesta_ia_para_usuario or ""),
+    )
 
     # Guardamos la respuesta de la IA en memoria para el contexto futuro
     sesion["historial"].append({"role": "assistant", "content": resultado_ia.respuesta_ia_para_usuario})
