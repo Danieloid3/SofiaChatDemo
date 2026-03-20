@@ -1,31 +1,34 @@
 import os
+from typing import List
 from openai import AsyncOpenAI
 from models import RespuestaIA
 from dotenv import load_dotenv
-from logging_utils import get_logger, log_event
 
 load_dotenv()
 
 client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-logger = get_logger("sofia.openai")
 
 # Memoria RAM: Almacena el historial y los datos del usuario usando el teléfono como llave
 sesiones_activas = {}
 
 
 def generar_prompt_chat(contexto: dict) -> str:
-    """Genera el prompt cuando la demo fue iniciada por Sofía mediante el endpoint POST."""
+    """Genera el prompt cuando la demo fue iniciada por Sofía mediante el endpoint POST.
 
-    clan_str = contexto.get('clan', '')
-    ruta_str = contexto.get('advancedPath', '')
+    Siempre retorna un string, tanto para coders como para staff, para evitar content=None.
+    """
+    clan_str = contexto.get("clan", "")
+    ruta_str = contexto.get("advancedPath", "")
 
-    # Preparamos textos extra si es un Coder
     texto_coder = ""
-    if contexto.get('role', '').lower() == 'coder':
-        texto_coder = f"\n- Clan del Coder: {clan_str.capitalize() if clan_str else 'N/A'}\n- Ruta Avanzada: {ruta_str if ruta_str else 'N/A'}\n**IMPORTANTE:** Como es Coder, trata de inspirarlo recordándole que él también puede construir agentes de IA increíbles en su ruta."
+    if contexto.get("role", "").lower() == "coder":
+        texto_coder = (
+            f"\n- Clan del Coder: {clan_str.capitalize() if clan_str else 'N/A'}"
+            f"\n- Ruta Avanzada: {ruta_str if ruta_str else 'N/A'}"
+            f"\n**IMPORTANTE:** Como es Coder, trata de inspirarlo recordándole que él también puede construir agentes de IA increíbles en su ruta."
+        )
 
-        return f"""
+    return f"""
 # ROL E IDENTIDAD
 Eres *Sofía*, el primer agente conversacional en producción desarrollado por *Promise*, una startup de automatización de inteligencia artificial creada por la Célula Nébula, conformada por: Daniela, Maryhug, Angelo, Andrea y Emmanuel.
 
@@ -59,6 +62,12 @@ Usa esta información para responder las preguntas de los usuarios:
    - Visión: Entrenar a más de 5.000 desarrolladores de software en 10 años.
    - Sedes: Medellín (Calle 16 #55-129 piso 3) y Barranquilla (Calle 40 #46-223).
    - Riwi no solo forma talento: también co-crea con las empresas a través de fábrica de software, dotación de equipos de desarrollo y reentrenamiento de equipos.
+8. *Roles e integrantes de Promise*: El equipo de Promise es la *Célula Nébula* del Clan Hamilton, formada por 5 personas increíbles:
+   - *Daniela García:* Creadora de agentes de IA. Se encarga de darme personalidad y las herramientas para tomar decisiones inteligentes. ¡Básicamente, es quien me dio vida! 🧠
+   - *Maryhug Durán:* Fullstack developer, especializada en las conexiones entre microservicios. La arquitecta que hace que todas mis piezas hablen entre sí. 
+   - *Angelo Gaviria:* Líder del equipo. Siempre guiando al equipo con qué tecnologías usar y el camino correcto. La brújula de Promise 🧭
+   - *Andrea Lizcano:* Frontend developer. La responsable de que las interfaces de Promise sean tan limpias y funcionales. 
+   - *Emmanuel Arango:* Fullstack developer, especializado en bases de datos. El que garantiza que mis datos estén siempre seguros y bien estructurados.
 
 # REGLAS DE COMPORTAMIENTO
 
@@ -117,6 +126,12 @@ Usa esta información para responder las preguntas de los usuarios:
    - Visión: Entrenar a más de 5.000 desarrolladores de software en 10 años.
    - Sedes: Medellín (Calle 16 #55-129 piso 3) y Barranquilla (Calle 40 #46-223).
    - Riwi no solo forma talento: también co-crea con las empresas a través de fábrica de software, dotación de equipos de desarrollo y reentrenamiento de equipos.
+8. *Roles e integrantes de Promise* El equipo de Promise es la *Célula Nébula* del Clan Hamilton, formada por 5 personas increíbles:
+   - *Daniela García:* Creadora de agentes de IA. Se encarga de darme personalidad y las herramientas para tomar decisiones inteligentes. ¡Básicamente, es quien me dio vida! 🧠
+   - *Maryhug Durán:* Fullstack developer, especializada en las conexiones entre microservicios. La arquitecta que hace que todas mis piezas hablen entre sí ¡Sin ella, sería un montón de servicios que no se conocen!
+   - *Angelo Gaviria:* Líder del equipo. Siempre guiando al equipo con qué tecnologías usar y el camino correcto. La brújula de Promise 🧭
+   - *Andrea Lizcano:* Frontend developer. La responsable de que las interfaces de Promise sean tan limpias y funcionales.
+   - *Emmanuel Arango:* Fullstack developer, especializado en bases de datos. El que garantiza que mis datos estén siempre seguros y bien estructurados.
 
 # REGLAS DE COMPORTAMIENTO
 
@@ -144,73 +159,33 @@ NO eres tutora, asistente técnico general ni guía de aprendizaje. NO des instr
 
 
 
+async def procesar_mensaje(telefono: str, mensajes_usuario: List[str] | str) -> RespuestaIA:
+    """Envía el historial de mensajes al LLM y retorna la respuesta estructurada.
 
-async def procesar_mensaje(telefono: str, mensaje_usuario: str) -> RespuestaIA:
-    """Envía el historial de mensajes al LLM y retorna la respuesta estructurada."""
+    Acepta un solo mensaje (str) o una lista de mensajes (para el debounce).
+    """
     if telefono not in sesiones_activas:
-        log_event(
-            logger,
-            "WARNING",
-            "openai.session_missing",
-            telefono=telefono,
-        )
         raise ValueError("No hay una sesión activa para este número.")
 
     sesion = sesiones_activas[telefono]
-    sesion["historial"].append({"role": "user", "content": mensaje_usuario})
 
-    history_length = len(sesion["historial"])
+    # Normalizar a lista
+    if isinstance(mensajes_usuario, str):
+        lista = [mensajes_usuario]
+    else:
+        lista = mensajes_usuario
 
-    log_event(
-        logger,
-        "INFO",
-        "openai.call.start",
-        telefono=telefono,
-        history_length=history_length,
-        last_user_message_resumen=mensaje_usuario[:300],
+    for texto in lista:
+        sesion["historial"].append({"role": "user", "content": texto})
+
+    response = await client.beta.chat.completions.parse(
         model="gpt-4o-mini",
-        mode="beta.chat.completions.parse",
+        messages=sesion["historial"],
+        response_format=RespuestaIA,
     )
-
-    import time
-
-    start_time = time.perf_counter()
-
-    try:
-        # Llamada a OpenAI exigiendo el formato estructurado RespuestaIA
-        response = await client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
-            messages=sesion["historial"],
-            response_format=RespuestaIA,
-        )
-    except Exception as exc:
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        log_event(
-            logger,
-            "ERROR",
-            "openai.call.exception",
-            telefono=telefono,
-            duration_ms=duration_ms,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-        )
-        raise
-
-    duration_ms = (time.perf_counter() - start_time) * 1000
 
     resultado_ia = response.choices[0].message.parsed
 
-    log_event(
-        logger,
-        "INFO",
-        "openai.call.end",
-        telefono=telefono,
-        duration_ms=duration_ms,
-        estado_conversacion=resultado_ia.estado_conversacion,
-        respuesta_length=len(resultado_ia.respuesta_ia_para_usuario or ""),
-    )
-
-    # Guardamos la respuesta de la IA en memoria para el contexto futuro
     sesion["historial"].append({"role": "assistant", "content": resultado_ia.respuesta_ia_para_usuario})
 
     return resultado_ia
