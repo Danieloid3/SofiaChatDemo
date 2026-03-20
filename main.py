@@ -87,7 +87,7 @@ async def iniciar_chat(solicitud: SolicitudChat):
 
         primer_mensaje = (
             f"¡Hola {solicitud.name}! 👋 Soy Sofía, el agente conversacional desarrollado por el equipo de *Promise* "
-            f"(del clan Hamilton). \n\n¡Qué emoción tenerte en nuestra demo interactiva! Además, aprovecho para felicitarte "
+            f"\n\n¡Qué emoción tenerte en nuestra demo interactiva! Además, aprovecho para felicitarte "
             f"porque a partir de la próxima semana inicias tu ruta avanzada en *{ruta_str}*. ¡Mucho éxito en este nuevo reto! 🚀\n\n"
             f"Hoy estoy aquí para mostrarte de qué estoy hecha. Puedes preguntarme sobre cómo funciono internamente, mi arquitectura de microservicios, el problema que resolvimos para RiwiCall o cualquier detalle de nuestro proyecto. ¿De qué te gustaría hablar?"
         )
